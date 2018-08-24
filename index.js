@@ -4,29 +4,27 @@ var defaults = require("lodash/object/defaults");
 var fs = require("fs-extra");
 var path = require("path");
 var chokidar = require("chokidar");
+var _ = require('lodash');
 
 
-module.exports = function (source, target, opts, notify) {
+module.exports = function (source, targets, opts) {
   opts = defaults(opts || {}, {
-    "watch": false,
-    "delete": false,
+    "watch": true,
+    "delete": true,
     "depth": Infinity
   });
 
   if (typeof opts.depth !== "number" || isNaN(opts.depth)) {
-    notify("error", "Expected valid number for option 'depth'");
     return false;
   }
 
   // Initial mirror
-  var mirrored = mirror(source, target, opts, notify, 0);
+  var mirrored = mirror(source, targets, opts, 0);
 
-  if (!mirrored) {
-    return false;
-  }
 
   if (opts.watch) {
     // Watcher to keep in sync from that
+    var watchAll = [...targets,source];
     chokidar.watch(source, {
       "persistent": true,
       "depth": opts.depth,
@@ -34,121 +32,146 @@ module.exports = function (source, target, opts, notify) {
       // TODO "ignore": opts.ignore
     })
     //.on("raw", console.log.bind(console, "raw"))
-    .on("ready", notify.bind(undefined, "watch", source))
-    .on("add", watcherCopy(source, target, opts, notify))
-    .on("addDir", watcherCopy(source, target, opts, notify))
-    .on("change", watcherCopy(source, target, opts, notify))
-    .on("unlink", watcherDestroy(source, target, opts, notify))
-    .on("unlinkDir", watcherDestroy(source, target, opts, notify))
-    .on("error", watcherError(opts, notify));
+    .on("ready", () => console.log("watch", source))
+    .on("add", watcherCopy(source, targets, opts))
+    .on("addDir", watcherCopy(source, targets, opts))
+    .on("change", watcherCopy(source, targets, opts))
+    .on("unlink", watcherDestroy(source, targets, opts))
+    .on("unlinkDir", watcherDestroy(source, targets, opts))
+    .on("error", watcherError(opts));
   }
 };
 
-function watcherCopy (source, target, opts, notify) {
+function watcherCopy (source, targets, opts) {
   return function (f, stats) {
-    copy(f, path.join(target, path.relative(source, f)), notify);
+      _.forEach(targets,function(t){
+          copy(f, [path.join(t, path.relative(source, f))]);
+      })
   };
 }
 
-function watcherDestroy (source, target, opts, notify) {
+function watcherDestroy (source, targets, opts) {
   return function (f) {
-    deleteExtra(path.join(target, path.relative(source, f)), opts, notify);
+      _.forEach(targets,function(t){
+          deleteExtra([path.join(t, path.relative(source, f))], opts);
+      })
+
   };
 }
 
-function watcherError (opts, notify) {
+function watcherError (opts) {
   return function (err) {
-    notify("error", err);
+      console.log(err)
   };
 }
 
-function mirror (source, target, opts, notify, depth) {
+function mirror (source, targets, opts, depth) {
   // Specifc case where the very source is gone
   var sourceStat;
   try {
     sourceStat = fs.statSync(source);
   } catch (e) {
     // Source not found: destroy target?
-    if (fs.existsSync(target)) {
-      return deleteExtra(target, opts, notify);
-    }
+    _.forEach(targets, function(t){
+        if (fs.existsSync(t)) {
+           deleteExtra([t], opts);
+        }
+    })
+
   }
 
-  var targetStat;
+  var targetStat = [];
   try {
-    targetStat = fs.statSync(target);
+    _.forEach(targets, function(t){
+        targetStat.push(fs.statSync(t));
+    })
+
   } catch (e) {
     // Target not found? good, direct copy
-    return copy(source, target, notify);
+    return copy(source, targets);
   }
 
-  if (sourceStat.isDirectory() && targetStat.isDirectory()) {
+  if (sourceStat.isDirectory()) {
     if (depth === opts.depth) {
-      notify("max-depth", source);
       return true;
     }
 
     // copy from source to target
     var copied = fs.readdirSync(source).every(function (f) {
-      return mirror(path.join(source, f), path.join(target, f), opts, notify, depth + 1);
+        var newTargets = [];
+        _.forEach(targets, function(t,i){
+            newTargets[i] = path.join(t, f)
+        })
+        return mirror(path.join(source, f), newTargets , opts, depth + 1);
     });
 
     // check for extraneous
-    var deletedExtra = fs.readdirSync(target).every(function (f) {
-      return fs.existsSync(path.join(source, f)) || deleteExtra(path.join(target, f), opts, notify);
-    });
+    var deletedExtra;
+    _.forEach(targets, function(t){
+        fs.readdirSync(t).every(function (f) {
+          return fs.existsSync(path.join(source, f)) || deleteExtra([path.join(t, f)], opts);
+      });
+      deletedExtra = true;
+    })
 
-    return copied && deletedExtra;
-  } else if (sourceStat.isFile() && targetStat.isFile()) {
+    return true;
+
+  } else if (sourceStat.isFile()) {
+      _.forEach(targetStat, function(t){
+          if(t.isFile()){
+              if (sourceStat.mtime > t.mtime) {
+                return copy(source, targets);
+              } else {
+                return true;
+              }
+          }
+      })
     // compare update-time before overwriting
-    if (sourceStat.mtime > targetStat.mtime) {
-      return copy(source, target, notify);
-    } else {
-      return true;
-    }
+
   } else if (opts.delete) {
     // incompatible types: destroy target and copy
-    return destroy(target, notify) && copy(source, target, notify);
+    return destroy(targets) && copy(source, targets);
   } else if (sourceStat.isFile() && targetStat.isDirectory()) {
     // incompatible types
-    notify("error", "Cannot copy file '" + source + "' to '" + target + "' as existing folder");
     return false;
   } else if (sourceStat.isDirectory() && targetStat.isFile()) {
     // incompatible types
-    notify("error", "Cannot copy folder '" + source + "' to '" + target + "' as existing file");
     return false;
   } else {
     throw new Error("Unexpected case: WTF?");
   }
 }
 
-function deleteExtra (fileordir, opts, notify) {
+function deleteExtra (fileordirs, opts) {
   if (opts.delete) {
-    return destroy(fileordir, notify);
+    return destroy(fileordirs);
   } else {
-    notify("no-delete", fileordir);
     return true;
   }
 }
 
-function copy (source, target, notify) {
-  notify("copy", [source, target]);
+function copy (source, targets) {
   try {
-    fs.copySync(source, target);
+      _.forEach(targets,function(t){
+          fs.copySync(source, t);
+      })
+
     return true;
   } catch (e) {
-    notify("error", e);
+      console.log(e);
     return false;
   }
 }
 
-function destroy (fileordir, notify) {
-  notify("remove", fileordir);
+function destroy (fileordirs) {
   try {
-    fs.remove(fileordir);
+      _.forEach(fileordirs, function(f){
+          fs.remove(f);
+      })
+
     return true;
   } catch (e) {
-    notify("error", e);
+      console.log(e)
     return false;
   }
 }
