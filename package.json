@@ -1,6 +1,6 @@
 {
   "name": "sync-files",
-  "version": "1.0.3",
+  "version": "1.0.4",
   "description": "Synchronize files or folders locally, with a watch option",
   "main": "index.js",
   "scripts": {},
@@ -9,7 +9,7 @@
   },
   "repository": {
     "type": "git",
-    "url": "https://github.com/lmtm/node-sync-files.git"
+    "url": "https://github.com/etrock/node-sync-files.git"
   },
   "keywords": [
     "rsync",
